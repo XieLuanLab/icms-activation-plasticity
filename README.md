@@ -1,5 +1,5 @@
 # icms-activation-plasticity
 
-This repository contains analysis code for our manuscript "Activation mechanism–dependent neural plasticity accompanies learning in an intracortical microstimulation task".
+This repository contains analysis code for "Learning induces activation-mechanism–dependent neural plasticity in an intracortical microstimulation task".
 
-**Status:** Manuscript in preparation. Code is currently being refactored and will be added over time.
+**Status:** Manuscript in revision. Code is currently being refactored and will be added over time.
