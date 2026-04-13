@@ -1,0 +1,11 @@
+panel,comparison,n1,n2,median1,median2,test,U,p,r
+Fig2A,threshold early(0-1) vs late(2-4),43,80,5.4000,3.9402,Mann-Whitney U,2564.0,7.681e-06,0.4034
+Fig2C,neuron_count_4uA early(0-1) vs late(2-4),13,41,82.5000,124.0000,Mann-Whitney U,166.0,0.04304,0.2753
+Fig2C,neuron_count_5uA early(0-1) vs late(2-4),20,35,136.0000,240.0000,Mann-Whitney U,210.0,0.01465,0.3291
+Fig2C,neuron_count_6uA early(0-1) vs late(2-4),22,26,206.0000,367.5000,Mann-Whitney U,155.0,0.006927,0.3898
+Fig2E,r50_5uA early(0-1) vs late(2-4),22,40,236.7033,285.2861,Mann-Whitney U,141.0,1.125e-05,0.5577
+Fig2E,density_5uA early(0-1) vs late(2-4),22,40,999.6920,2029.2255,Mann-Whitney U,275.0,0.01548,0.3074
+Fig2G,neuron_count_threshold early(0-1) vs late(2-4),32,69,76.5000,156.0000,Mann-Whitney U,947.0,0.2533,0.1137
+Fig2G,density_threshold early(0-1) vs late(2-4),32,69,626.6726,865.4050,Mann-Whitney U,1013.5,0.5111,0.0654
+Fig2G,neuron_count_threshold early(0-1) vs late(2-4),32,69,76.5000,156.0000,Mann-Whitney U,947.0,0.2533,0.1137
+Fig2G,density_threshold early(0-1) vs late(2-4),32,69,626.6726,865.4050,Mann-Whitney U,1013.5,0.5111,0.0654
