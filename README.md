@@ -8,7 +8,7 @@ Kim et al., *Science Advances* (2026)
 ## Setup
 
 ### Data
-Download processed data from Zenodo and place contents in the `data/` directory.
+Download processed data from Zenodo (10.5281/zenodo.17727761) and place contents in the `data/` directory.
 
 ### Python (Figures 4-6, S1, S3-S8)
 ```bash
