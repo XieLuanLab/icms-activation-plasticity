@@ -1,0 +1,491 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+import contextlib
+
+from spikeinterface import full as si
+
+from batch_process.util.curate_util import *
+
+import warnings
+
+# ignore OMP_NUM_THREADS memory leaks warning
+warnings.filterwarnings("ignore")
+
+
+@contextlib.contextmanager
+def _suppress_c_stdout():
+    """Suppress C-level stdout/stderr (e.g. isosplit6 'new parcel has no points' warnings)."""
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    old_stdout = os.dup(1)
+    old_stderr = os.dup(2)
+    try:
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        yield
+    finally:
+        os.dup2(old_stdout, 1)
+        os.dup2(old_stderr, 2)
+        os.close(devnull)
+        os.close(old_stdout)
+        os.close(old_stderr)
+
+
+def mean_norm_peak(dense_template, sparse_ch_indices, min_idx=30, range_offset=10):
+    max_peaks = np.max(
+        np.abs(dense_template[min_idx -
+               range_offset: min_idx + range_offset + 1, :]),
+        axis=0,
+    )
+    all_ch_indices = np.arange(dense_template.shape[1])
+    # Exclude sparse template channels
+    non_sparse_ch_indices = np.setdiff1d(all_ch_indices, sparse_ch_indices)
+    max_peaks_non_sparse = max_peaks[non_sparse_ch_indices]
+    template_peak = np.min(dense_template[min_idx, :])
+    normalized_peaks_non_sparse = max_peaks_non_sparse / np.abs(template_peak)
+    top_peaks = np.sort(normalized_peaks_non_sparse)[-5:]
+    mnr = np.mean(top_peaks)
+
+    return mnr
+
+
+def exclude_artifact_subcluster(analyzer, unit_id, subcluster_indices):
+    # set 120 um sparsity radius to ignore more channels nearby primary channel
+    # for mean_norm_peak calculation
+
+    sparsity = si.compute_sparsity(analyzer, method="radius", radius_um=120)
+    unit_id_to_ch_ind = sparsity.unit_id_to_channel_indices
+    sparse_ch_indices = unit_id_to_ch_ind[unit_id]
+
+    # dense analyzer
+    wvf_ext = analyzer.get_extension("waveforms")
+    wvfs = wvf_ext.get_waveforms_one_unit(unit_id=unit_id)
+    dense_template = np.mean(wvfs[subcluster_indices, :, :], axis=0)
+
+    mnr = mean_norm_peak(dense_template, sparse_ch_indices)
+    # set 60 um sparsity radius
+    # analyzer.sparsity = si.compute_sparsity(
+    #     analyzer, method="radius", radius_um=60)
+
+    # if greater than 0.25, exclude
+    return mnr > 0.25
+
+
+def calculate_snr(primary_ch_wvfs, min_idx, subcluster_indices=None, threshold=2.0):
+    if subcluster_indices is not None:
+        primary_ch_wvfs = primary_ch_wvfs[subcluster_indices, :]
+
+    mean_primary_wvfs = np.mean(primary_ch_wvfs, axis=0)
+    # plt.figure()
+    # plt.plot(mean_primary_wvfs)
+    std_at_valley = np.std(primary_ch_wvfs[:, min_idx], axis=0)
+    mean_at_valley = abs(mean_primary_wvfs[min_idx])
+    snr_valley = mean_at_valley / std_at_valley
+
+    snr_good = snr_valley >= threshold
+    return snr_valley, snr_good
+
+
+def check_abs_max_idx(primary_template, min_idx):
+    abs_max_idx = np.argmax(np.abs(primary_template))
+    if not (min_idx - 1 <= abs_max_idx <= min_idx + 1):
+        return False
+    return True
+
+
+def too_large_trough_to_peak(primary_template, trough_idx=30, max_duration=30):
+    # Calculate the duration from trough to peak
+    peak_idx = np.argmax(
+        primary_template[trough_idx: trough_idx + 40]) + trough_idx
+    trough_to_peak_duration = peak_idx - trough_idx
+    return trough_to_peak_duration > max_duration
+
+
+def bad_repolarization_time(primary_template, min_samples=2, max_samples=20):
+    # TOO MANY FALSE NEGATIVES
+    derivative = np.diff(primary_template)
+    # Find the late positive peak (local maximum after the trough)
+    late_positive_peak_idx = np.argmax(primary_template[31:]) + 31
+
+    # Ensure late_positive_peak_idx is within bounds
+    if late_positive_peak_idx >= len(derivative):
+        return True, np.nan
+
+    # Find the inflection point after the late positive peak
+    falling_branch = derivative[late_positive_peak_idx:]
+
+    # Check if falling_branch is empty
+    if falling_branch.size == 0:
+        return True, np.nan
+
+    inflection_point_idx = np.argmin(falling_branch) + late_positive_peak_idx
+    repolarization_time = inflection_point_idx - late_positive_peak_idx
+
+    return not (min_samples <= repolarization_time <= max_samples), repolarization_time
+
+
+def exceeds_negative_slope(primary_template, threshold=-5):
+    slope = (primary_template[16] - primary_template[0]) / 16
+    return slope < threshold
+
+
+def remove_bad_waveforms(primary_ch_subc_wvfs, indices, threshold_percentage=95):
+    # Calculate distance from the mean waveform to determine which waveforms are outliers
+    primary_ch_seg_wvfs = primary_ch_subc_wvfs[indices, 20:42]
+    mean_waveform = np.mean(primary_ch_seg_wvfs, axis=0)
+    distances = np.linalg.norm(primary_ch_seg_wvfs - mean_waveform, axis=1)
+    threshold_distance = np.percentile(distances, threshold_percentage)
+
+    # Correctly map indices to mark which are good and bad
+    is_good = distances < threshold_distance
+    good_indices = indices[is_good]
+    return good_indices
+
+
+def isi_violation_percentage(spike_train, refractory_period=2e-3, threshold=7):
+    # Wu et al., 2024
+    isis = np.diff(spike_train) / 30000
+    n_violations = np.sum(isis < refractory_period)
+    total_spikes = len(spike_train)
+    violation_percentage = (n_violations / total_spikes) * 100
+    isi_good = violation_percentage < threshold
+    return violation_percentage, isi_good
+
+
+def accept_subcluster_old(analyzer, unit_id, subcluster_indices, min_idx=30, max_iterations=5):
+    original_indices = np.arange(len(subcluster_indices))
+
+    templates = analyzer.get_extension("templates")
+    template = templates.get_unit_template(unit_id)
+
+    wvf_ext = analyzer.get_extension("waveforms")
+    wvfs = wvf_ext.get_waveforms_one_unit(unit_id=unit_id)
+
+    primary_ch_wvfs = template_util.get_unit_primary_ch_wvfs(analyzer, unit_id)
+
+    wvf_shape = template.shape
+    primary_ch_subc_wvfs = primary_ch_wvfs[subcluster_indices, :]
+
+    primary_ch_subc_template = np.mean(primary_ch_subc_wvfs, axis=0)
+
+    spike_train = analyzer.sorting.get_unit_spike_train(unit_id=unit_id)[
+        subcluster_indices]
+
+    if exclude_artifact_subcluster(analyzer, unit_id, subcluster_indices):
+        print("\tSubcluster classified as artifact.")
+        return original_indices, [], "artifact"
+
+    if not check_abs_max_idx(primary_ch_subc_template, min_idx):
+        print("\tAbsolute max index out of range.")
+        return original_indices, [], "max_idx_out_of_range"
+
+    if too_large_trough_to_peak(primary_ch_subc_template):
+        print("\tTrough to peak too large.")
+        return original_indices, [], "large_T2P"
+
+    if exceeds_negative_slope(primary_ch_subc_template):
+        print("\tWaveform pre-trough exceeds negative slope threshold.")
+        return original_indices, [], "negative_slope"
+
+    current_indices = original_indices
+    for iteration in range(max_iterations):
+        snr_valley, snr_good = calculate_snr(
+            primary_ch_subc_wvfs, min_idx, current_indices)
+        violation_percentage, isi_good = isi_violation_percentage(
+            spike_train[current_indices])
+        print(f"\tISI violation %: {violation_percentage:.2f}")
+
+        if snr_good and isi_good:
+            break
+
+        if not snr_good or not isi_good:
+            good_indices = remove_bad_waveforms(
+                primary_ch_subc_wvfs, current_indices)
+            current_indices = good_indices
+
+        print(
+            f"\tIteration {iteration}: SNR {snr_valley:.2f}, ISI Violation Rate {violation_percentage:.2f}%"
+        )
+
+    if not snr_good:
+        print("\tSubcluster SNR too low.")
+        return original_indices, [], "low_snr"
+
+    if not isi_good:
+        print("\tSubcluster ISI violation rate too high.")
+        return original_indices, [], "isi_violation"
+
+    if len(current_indices) <= 50:
+        print("\tToo few spikes.")
+        return original_indices, [], "too_few_spikes"
+
+    print("\tSubcluster classified as accepted.")
+    return current_indices, np.setdiff1d(original_indices, current_indices), "accept"
+
+
+def accept_subcluster(analyzer, unit_id, subcluster_indices, min_idx=30):
+    original_indices = np.arange(len(subcluster_indices))
+
+    templates = analyzer.get_extension("templates")
+    template = templates.get_unit_template(unit_id)
+
+    wvf_ext = analyzer.get_extension("waveforms")
+    wvfs = wvf_ext.get_waveforms_one_unit(unit_id=unit_id)
+
+    primary_ch_wvfs = template_util.get_unit_primary_ch_wvfs(analyzer, unit_id)
+
+    wvf_shape = template.shape
+    primary_ch_subc_wvfs = primary_ch_wvfs[subcluster_indices, :]
+
+    primary_ch_subc_template = np.mean(primary_ch_subc_wvfs, axis=0)
+
+    if exclude_artifact_subcluster(analyzer, unit_id, subcluster_indices):
+        print("\tSubcluster classified as artifact.")
+        return original_indices, [], "artifact"
+
+    if not check_abs_max_idx(primary_ch_subc_template, min_idx):
+        print("\tAbsolute max index out of range.")
+        return original_indices, [], "max_idx_out_of_range"
+
+    if too_large_trough_to_peak(primary_ch_subc_template):
+        print("\tTrough to peak too large.")
+        return original_indices, [], "large_T2P"
+
+    if exceeds_negative_slope(primary_ch_subc_template):
+        print("\tWaveform pre-trough exceeds negative slope threshold.")
+        return original_indices, [], "negative_slope"
+
+    # SNR check without ISI violation loop
+    snr_valley, snr_good = calculate_snr(
+        primary_ch_subc_wvfs, min_idx, original_indices)
+    if not snr_good:
+        print("\tSubcluster SNR too low.")
+        return original_indices, [], "low_snr"
+
+    if len(original_indices) <= 50:
+        print("\tToo few spikes.")
+        return original_indices, [], "too_few_spikes"
+
+    print("\tSubcluster classified as accepted.")
+    return original_indices, [], "accept"
+
+
+def cluster_waveforms(X):
+    # X represents truncated primary waveforms for a single unit as detected by Mountainsort.
+    # Shape of X: (number of waveforms) x (number of samples per waveform) x 1.
+    #
+    # These waveforms are assumed to be "undersplit," meaning that the unit detected by Mountainsort
+    # may actually consist of multiple distinct clusters or neuron groups that have been grouped together.
+    #
+    # The purpose of this function is to identify and separate these subclusters by applying UMAP for dimensionality
+    # reduction followed by Isosplit6 clustering. The function returns labels for each waveform, indicating its
+    # membership in one of the detected subclusters.
+
+    n_neighbors = 50
+    min_dist = 0.1
+    for iteration in range(1, 6):
+        reducer = umap.UMAP(n_neighbors=n_neighbors,
+                            min_dist=min_dist, n_jobs=-1)
+        wvfs_umap = reducer.fit_transform(X)
+        umap_x = wvfs_umap[:, 0]
+        umap_y = wvfs_umap[:, 1]
+        with _suppress_c_stdout():
+            subcluster_labels = isosplit6(wvfs_umap)
+        if len(np.unique(subcluster_labels)) <= 4:
+            break
+        n_neighbors += 10
+        min_dist += 0.1
+    else:
+        print("Failed to produce <= 4 clusters after 5 iterations.")
+    return subcluster_labels, umap_x, umap_y
+
+
+def process_single_subcluster(
+    analyzer,
+    unit_id,
+    subcluster_id,
+    subcluster_labels,
+    good_indices,
+    waveform_labels,
+    final_subcluster_labels,
+):
+    relative_indices = np.where(subcluster_labels == subcluster_id)[0]
+    # Map these indices to their original indices using good_indices
+    subcluster_indices = good_indices[relative_indices]
+
+    kept_indices, discarded_indices, subcluster_label = accept_subcluster(
+        analyzer, unit_id, subcluster_indices)
+
+    if subcluster_label == "accept":
+        if len(kept_indices) > 0:
+            waveform_labels[subcluster_indices[kept_indices]] = subcluster_id
+        if len(discarded_indices) > 0:
+            waveform_labels[subcluster_indices[discarded_indices]] = 0
+    else:
+        waveform_labels[subcluster_indices] = subcluster_id
+
+    final_subcluster_labels.append((subcluster_id, subcluster_label))
+
+
+def post_hoc_check(analyzer, unit_id, subcluster_indices, min_idx=30):
+    original_indices = np.arange(len(subcluster_indices))
+
+    template_ch_dict = get_template_ch(analyzer)
+    wvf_shape = analyzer.get_template(unit_id).shape
+    if wvf_shape[1] <= 3:
+        primary_ch_idx = template_ch_dict[unit_id]["primary_ch_idx_dense"]
+    else:
+        primary_ch_idx = template_ch_dict[unit_id]["primary_ch_idx_sparse"]
+
+    primary_ch_subc_wvfs = analyzer.get_waveforms(
+        unit_id=unit_id)[subcluster_indices, :, primary_ch_idx]
+    # plt.figure()
+    # plt.plot(primary_ch_subc_wvfs.T)
+
+    primary_ch_subc_template = np.mean(primary_ch_subc_wvfs, axis=0)
+
+    spike_train = analyzer.sorting.get_unit_spike_train(unit_id=unit_id)[
+        subcluster_indices]
+
+    snr_valley, snr_good = calculate_snr(
+        primary_ch_subc_wvfs, min_idx, original_indices)
+
+    if exclude_artifact_subcluster(analyzer, unit_id, subcluster_indices):
+        print("\tSubcluster classified as artifact.")
+        return "artifact"
+
+    if not abs_max_loc_at_valley(primary_ch_subc_template, min_idx):
+        print("\tSubcluster template valley not abs max.")
+        return "not abs max"
+
+    if not snr_good:
+        print("\tSubcluster SNR too low.")
+        return "low SNR"
+
+    violation_percentage, isi_good = isi_violation_percentage(
+        spike_train[original_indices])
+
+    if not isi_good:
+        print("\tSubcluster ISI violation rate too high.")
+        print(f"\tISI violation %: {violation_percentage:.2f}")
+        return "isi_bad"
+
+    print("\tSubcluster classified as accepted.")
+    return "accept"
+
+
+# %% Viz
+
+# TODO save
+def plot_umap_subcluster(unit_id, x, y, final_labels, subcluster_ids):
+    plt.figure()
+    colors = ["C0", "C1", "C2", "C3", "C4", "C5"]
+    label_colors = {label: colors[i % len(colors)]
+                    for i, label in enumerate(subcluster_ids)}
+    cluster_colors = [label_colors[label] for label in final_labels]
+    scatter = plt.scatter(x, y, c=cluster_colors, s=1, alpha=1)
+    handles = [
+        plt.Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="w",
+            label=f"Cluster {label}",
+            markerfacecolor=color,
+            markersize=10,
+        )
+        for label, color in label_colors.items()
+    ]
+    plt.legend(handles=handles, title="Clusters")
+    plt.title(f"UMAP: unit {unit_id}")
+    plt.show()
+    plt.pause(0.001)
+
+
+def plot_clustered_waveforms(
+    analyzer,
+    unit_id,
+    waveform_labels,
+    template_labels,
+    plot_mean_std=True,
+    N=2,
+    fig_width=6,
+    fig_height=4,
+):
+    # Ignore label 0 noise events
+    colors = ["k", "C0", "C1", "C2", "C3", "C4", "C5"]
+    unique_labels, counts = np.unique(waveform_labels, return_counts=True)
+
+    primary_cluster_index = np.argmax(counts)
+    primary_cluster_label = unique_labels[primary_cluster_index]
+
+    wvf_ext = analyzer.get_extension("waveforms")
+    wvfs = wvf_ext.get_waveforms_one_unit(unit_id=unit_id)
+
+    primary_ch_wvfs = template_util.get_unit_primary_ch_wvfs(analyzer, unit_id)
+
+    num_cols = 3
+    num_rows = (len(unique_labels) + num_cols - 1) // num_cols
+
+    fig, axes = plt.subplots(
+        num_rows, num_cols, figsize=(fig_width, fig_height))
+    axes = axes.flatten()
+
+    for i, unique_label in enumerate(unique_labels):
+        ax = axes[i]
+        event_indices = np.where(waveform_labels == unique_label)[0]
+
+        all_wvfs = primary_ch_wvfs[event_indices, :]
+
+        if plot_mean_std:
+            mean_wvfs = np.mean(all_wvfs, axis=0)
+            std_wvfs = np.std(all_wvfs, axis=0)
+            time_points = np.arange(mean_wvfs.shape[0]) / 30
+            ax.plot(
+                time_points,
+                mean_wvfs,
+                label=f"Label {unique_label}",
+                color=colors[i % len(colors)],
+                linewidth=0.8,
+            )
+
+            ax.fill_between(
+                time_points,
+                mean_wvfs - std_wvfs,
+                mean_wvfs + std_wvfs,
+                color=colors[i % len(colors)],
+                alpha=0.2,
+            )
+        else:
+            for j in range(0, all_wvfs.shape[0], N):
+                ax.plot(
+                    all_wvfs[j, :],
+                    color=colors[i % len(colors)],
+                    alpha=0.2,
+                    linewidth=0.5,
+                )
+
+        if unique_label == 0:
+            title = "Label 0 (discarded)"
+        else:
+            title = f"Label {unique_label} ({template_labels[i-1]})"
+
+        ax.set_title(f"{title}\n{len(event_indices)} waveforms", fontsize=9)
+
+        ax.set_ylim([-500, 300])
+
+        ax.set_xticks([0, 1, 2, 3])
+        ax.set_xticklabels([0, 1, 2, 3])
+
+        if i == 0:
+            ax.set_xlabel("Time (ms)")
+            ax.set_ylabel("Amplitude (uV)")
+
+    # Hide unused subplots
+    for j in range(i + 1, len(axes)):
+        fig.delaxes(axes[j])
+
+    plt.suptitle(f"{unit_id}")
+    plt.tight_layout()  # Adjust layout to prevent overlap
+    plt.show()
+    plt.pause(0.001)

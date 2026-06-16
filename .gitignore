@@ -1,0 +1,10 @@
+output/
+data/
+__pycache__/
+*.pyc
+.DS_Store
+.claude/
+*.docx
+*.pdf
+~$*
+.spyproject/

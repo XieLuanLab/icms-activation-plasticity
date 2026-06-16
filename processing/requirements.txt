@@ -1,0 +1,20 @@
+# Dependencies for the processing pipeline (heavier than the figure code).
+# The figures themselves only need the top-level requirements.txt + Zenodo data.
+# Versions pinned to the environment used to produce the published data (Python 3.12).
+spikeinterface==0.103.2
+probeinterface==0.3.1
+mountainsort5==0.5.8
+isosplit6==0.1.4
+numcodecs==0.15.1
+numba==0.64.0
+h5py==3.15.1
+dill==0.4.1
+umap-learn==0.5.11      # cell-type classification, curation
+UnitMatchPy==3.3.0      # longitudinal unit tracking (run_unitmatch_*.py)
+python-pptx==1.0.2      # per-unit QC slide export
+numpy==2.1.3
+scipy==1.17.1
+pandas==2.3.3
+scikit-learn==1.8.0
+matplotlib==3.10.8
+seaborn==0.13.2

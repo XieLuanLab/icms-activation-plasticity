@@ -1,0 +1,325 @@
+from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+
+from spikeinterface import full as si
+from batch_process.util.ppt_image_inserter import PPTImageInserter
+
+
+# from batch_process.util.ppt_image_inserter import PPTImageInserter
+
+
+def add_sig_bracket(ax, x1, x2, y, h=0.9, text="ns", lw=0.32):
+    """Draw a bracket from x1 to x2 at height y, with little vertical caps of height h."""
+    ax.plot([x1, x1, x2, x2], [y, y+h, y+h, y],
+            color="k", lw=lw, clip_on=False)
+    if text == "ns":
+        text_offset = 0.2
+    else:
+        text_offset = -0.1
+    ax.text((x1+x2)/2, y+text_offset, text,
+            ha="center", va="bottom")
+
+
+def p_to_stars(p):
+    if p < 1e-3:
+        return "***"
+    if p < 1e-2:
+        return "**"
+    if p < 5e-2:
+        return "*"
+    return "ns"
+
+
+def plot_units_in_batches(sparse_analyzer, save_dir, ppt_name, unit_ids=None, unit_colors=None, batch_size=5):
+
+    if sparse_analyzer.sparsity is None:
+        print("Error! Analyzer is not sparse.")
+        return None
+    # analyzer.compute("template_similarity")
+
+    ppt_inserter = PPTImageInserter(grid_dims=(
+        2, 2), spacing=(0.05, 0.05), title_font_size=16)
+
+    if unit_ids is None:
+        num_units = len(sparse_analyzer.unit_ids)
+        unit_ids = sparse_analyzer.unit_ids
+    else:
+        num_units = len(unit_ids)
+
+    if unit_colors is None:
+        unit_colors = {unit_id: "k" for unit_id in unit_ids}
+
+    for start in range(0, num_units, batch_size):
+        end = min(start + batch_size, num_units)
+        batch_unit_ids = unit_ids[start:end]
+
+        fig = plt.figure(figsize=(10, 8))
+        gs = GridSpec(2, 1, height_ratios=[1, 1])
+
+        n_in_batch = len(batch_unit_ids)
+
+        # Always use batch_size columns so panels stay consistent width
+        gs1 = GridSpecFromSubplotSpec(
+            1, batch_size, subplot_spec=gs[0])
+        template_axes = [fig.add_subplot(gs1[i])
+                         for i in range(batch_size)]
+
+        # Plot unit templates on populated axes, hide the empty ones
+        for i in range(batch_size):
+            ax = template_axes[i]
+            if i < n_in_batch:
+                unit_id = batch_unit_ids[i]
+                all_wvfs = sparse_analyzer.get_extension(
+                    extension_name="waveforms")
+                unit_wvfs = all_wvfs.get_waveforms_one_unit(unit_id=unit_id)
+                num_spikes = len(unit_wvfs)
+
+                # Get peak-to-peak amplitude on primary channel
+                templates_ext = sparse_analyzer.get_extension("templates")
+                template = templates_ext.get_unit_template(unit_id)
+                # Primary channel = channel with largest peak-to-peak
+                ptp_per_ch = np.ptp(template, axis=0)
+                ptp_uv = ptp_per_ch.max()
+
+                si.plot_unit_templates(
+                    sparse_analyzer,
+                    sparsity=sparse_analyzer.sparsity,
+                    unit_ids=[unit_id],
+                    same_axis=True,
+                    unit_colors=unit_colors,
+                    x_offset_units=True,
+                    templates_percentile_shading=None,
+                    plot_legend=False,
+                    ax=ax,
+                )
+                ax.xaxis.set_visible(False)
+                ax.set_title(f"Unit {unit_id}\n# spikes: {num_spikes}\nPTP: {ptp_uv:.0f} uV")
+            else:
+                ax.set_visible(False)
+
+        # Second subplot grid for autocorrelograms
+        gs2 = GridSpecFromSubplotSpec(
+            1, batch_size, subplot_spec=gs[1])
+        autocorr_axes_all = [fig.add_subplot(gs2[i])
+                             for i in range(batch_size)]
+
+        # Only pass the populated axes to the SI plotter
+        autocorr_axes_used = autocorr_axes_all[:n_in_batch]
+
+        si.plot_autocorrelograms(
+            sparse_analyzer,
+            unit_ids=batch_unit_ids,
+            axes=autocorr_axes_used,
+            unit_colors=unit_colors,
+        )
+
+        # Hide x-axis and y-axis labels for the autocorrelograms
+        for i, ax in enumerate(autocorr_axes_used):
+            if i > 0:
+                ax.xaxis.set_visible(False)
+            ax.title.set_visible(False)
+
+        # Hide empty autocorrelogram slots
+        for i in range(n_in_batch, batch_size):
+            autocorr_axes_all[i].set_visible(False)
+
+        plt.tight_layout()
+        plt.subplots_adjust(hspace=0.2, wspace=0.4)
+
+        img_path = save_dir / "img.png"
+        plt.savefig(str(img_path))
+        ppt_inserter.add_image(str(img_path))
+        plt.close()
+
+    ppt_inserter.save(save_dir / f"{ppt_name}.pptx")
+
+
+def plot_primary_ch_template(analyzer, unit_ids, template_ch_dict, plot=True, ax=None):
+
+    analyzer.sparsity = si.compute_sparsity(
+        analyzer, method="radius", radius_um=60)
+
+    analyzer.compute("random_spikes")
+    analyzer.compute("waveforms")
+    analyzer.compute("templates")
+
+    templates_ext = analyzer.get_extension("templates")
+    wvfs_per_unit = analyzer.sorting.count_num_spikes_per_unit()
+
+    templates = []
+    for unit_id in unit_ids:
+
+        num_wvfs = wvfs_per_unit[unit_id]
+
+        primary_ch_idx = template_ch_dict[unit_id]["primary_ch_idx_dense"]
+        template = templates_ext.get_unit_template(unit_id)[:, primary_ch_idx]
+
+        templates.append(template)
+        label = f"Unit {unit_id} ({num_wvfs} waveforms)"
+        if plot:
+            if ax is not None:
+                ax.plot(template, label=label)
+            else:
+                plt.plot(template, label=label)
+    if plot:
+        if ax is not None:
+            ax.legend()
+        else:
+            plt.legend()
+    return np.array(templates)
+
+
+def adjust_font_sizes(ax, fontsize=10):
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        label.set_fontsize(fontsize)
+    ax.xaxis.label.set_size(fontsize)
+    ax.yaxis.label.set_size(fontsize)
+    ax.title.set_size(fontsize)
+    legend = ax.get_legend()
+    if legend:
+        for text in legend.get_texts():
+            text.set_fontsize(fontsize)
+
+
+def add_scale_bars(
+    ax,
+    h_pos,
+    v_pos,
+    h_length,
+    v_length,
+    line_width=1,
+    h_label="",
+    v_label="",
+    font_size=6,
+):
+    """
+    Add horizontal and vertical scale bars to a Matplotlib axes.
+
+    :param ax: The axes to add scale bars to.
+    :param h_pos: Tuple (x, y) for the starting position of the horizontal scale bar.
+    :param v_pos: Tuple (x, y) for the starting position of the vertical scale bar.
+    :param h_length: Length of the horizontal scale bar.
+    :param v_length: Length of the vertical scale bar.
+    :param line_width: Width of the scale bar lines.
+    :param h_label: Label for the horizontal scale bar.
+    :param v_label: Label for the vertical scale bar.
+    """
+    # Add horizontal scale bar
+    ax.hlines(h_pos[1], h_pos[0], h_pos[0] + h_length,
+              color="black", linewidth=line_width)
+    # Position the horizontal label below the line
+    ax.text(
+        h_pos[0] + h_length / 2,
+        h_pos[1] - 100,
+        h_label,
+        verticalalignment="top",
+        horizontalalignment="center",
+        fontsize=font_size,
+    )
+
+    # Add vertical scale bar
+    ax.vlines(v_pos[0], v_pos[1], v_pos[1] + v_length,
+              color="black", linewidth=line_width)
+    # Rotate the vertical label by 90 degrees
+    ax.text(
+        v_pos[0] + v_label_x_offset,
+        v_pos[1] + v_label_y_offset,
+        v_label,
+        verticalalignment="center",
+        horizontalalignment="right",
+        rotation=90,
+        fontsize=font_size,
+    )
+
+
+def add_scale_bars_wvf(
+    ax,
+    h_pos,
+    v_pos,
+    h_length,
+    v_length,
+    font_size=None,
+    line_width=1,
+    h_label="",
+    v_label="",
+    v_label_x_offset=50,
+    v_label_y_offset=50,
+    v_label_angle=90,
+    h_label_x_offset=50,
+    h_label_y_offset=10,
+):
+    """
+    Add horizontal and vertical scale bars to a Matplotlib axes.
+
+    :param ax: The axes to add scale bars to.
+    :param h_pos: Tuple (x, y) for the starting position of the horizontal scale bar.
+    :param v_pos: Tuple (x, y) for the starting position of the vertical scale bar.
+    :param h_length: Length of the horizontal scale bar.
+    :param v_length: Length of the vertical scale bar.
+    :param line_width: Width of the scale bar lines.
+    :param h_label: Label for the horizontal scale bar.
+    :param v_label: Label for the vertical scale bar.
+    """
+    # Add horizontal scale bar
+    ax.hlines(h_pos[1], h_pos[0], h_pos[0] + h_length,
+              color="black", linewidth=line_width, capstyle='butt')
+    # Position the horizontal label below the line
+    ax.text(
+        h_pos[0] + h_label_x_offset,
+        h_pos[1] + h_label_y_offset,
+        h_label,
+        verticalalignment="top",
+        horizontalalignment="center",
+        fontsize=font_size,
+    )
+
+    # Add vertical scale bar
+    ax.vlines(v_pos[0], v_pos[1], v_pos[1] + v_length,
+              color="black", linewidth=line_width, capstyle='butt')
+    # Rotate the vertical label by 90 degrees
+    ax.text(
+        v_pos[0] + v_label_x_offset,
+        v_pos[1] + v_label_y_offset,
+        v_label,
+        verticalalignment="center",
+        horizontalalignment="right",
+        rotation=v_label_angle,
+        fontsize=font_size,
+    )
+
+
+def draw_significance_bar(p_val, ax=None):
+    if ax is None:
+        fig, ax = plt.subplots(1, 1)
+
+    x1, x2 = 0, 1
+    y, h, col = ax.get_ylim()[1] + 0.5, 1, 'k'
+    ax.plot([x1, x1, x2, x2], [y, y+h, y+h, y], lw=0.5, c=col)
+
+    # Choose star level
+    if p_val < 0.001:
+        stars = '***'
+    elif p_val < 0.01:
+        stars = '**'
+    elif p_val < 0.05:
+        stars = '*'
+    else:
+        stars = 'NS'
+
+    ax.text((x1+x2)*.5, y+h + 0.05, stars, ha='center', va='bottom', color=col)
+
+
+def get_stim_colormap():
+    palette = sns.color_palette("deep")
+
+    color_map = {}
+    # place less common currents last
+    currents = [2, 3, 4, 5, 6, 7, 8, 9, 1, 10]
+    for i, current in enumerate(currents):
+        color_map[current] = palette[i]
+    color_map[11] = palette[0]
+    color_map[12] = palette[1]
+    color_map[13] = palette[2]
+    return color_map
