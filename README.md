@@ -1,14 +1,13 @@
-# ICMS Plasticity - Figure Reproduction Code
+# ICMS Plasticity - Analysis and Figure Reproduction Code
 
-Code for reproducing the figures in:
+Code for analysis workflows and figure reproduction associated with:
 
 **"Learning induces activation-mechanism-dependent neural plasticity in an intracortical microstimulation task"**
 Robin Kim, Roy Lycke, Pavlo Zolotavin, Jon Montes, Chong Xie, Lan Luan.
 Science Advances (2026), accepted.
 
-- **Source code:** https://github.com/XieLuanLab/icms-activation-plasticity
 - **Figure source data (Zenodo):** https://doi.org/10.5281/zenodo.21382755
-- **Processed recordings, NWB (DANDI):** https://dandiarchive.org/dandiset/001868
+- **Processed recordings, NWB (DANDI):** https://doi.org/10.48324/dandi.001868/0.260715.2016
 
 ## Repository layout
 
