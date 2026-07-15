@@ -1,12 +1,14 @@
 """Figure S5 -- Movement control (symmetric 120ms window analysis).
 
 Layout:
-    Row 1 (4 panels): PL mod | NPL mod | PL t2max | NPL t2max
+    A/B/D: Wheel movement traces, single-trial onset detection, onset distribution
+    C: Movement onset early vs late
+    E-H: PL mod | NPL mod | PL t2max | NPL t2max
 
-Wheel movement panels saved separately as 1x3.
+Wheel movement panels are saved separately from the neural modulation panels.
 
 Usage (from repo root):
-    python python/fig_s5/generate_figure.py
+    python -m python.fig_s5.generate_figure
 """
 import sys
 from pathlib import Path
@@ -23,6 +25,7 @@ from matplotlib.collections import PathCollection
 from scipy.stats import mannwhitneyu
 from scipy.signal import butter, filtfilt
 from statsmodels.stats.multitest import multipletests
+from datetime import datetime
 
 from utils.config import (RAW_DF_120MS_PATH, POP_COUPLING_DIR, ANIMALS_PC_ALL,
                           OUTPUT_DIR, Z_CLIP, DATA_DIR)
@@ -243,6 +246,9 @@ def plot_pop_coupling(ax, df_mod):
 FS_WHEEL = 1000.0
 ONSET_THRESHOLD_FRAC = 0.5
 ONSET_SUSTAINED_MS = 50
+ONSET_ANIMALS = ['ICMS92', 'ICMS93', 'ICMS98', 'ICMS100', 'ICMS101']
+ONSET_MAX_WEEK = 5
+PROCESSED_WHEEL_DIR = DATA_DIR / 'wheel_movement' / 'processed'
 
 
 def unwrap_by_jump(x, jump_thresh=2000, wrap_val=4096):
@@ -533,6 +539,122 @@ def generate_wheel_panels():
     print(f'  Saved wheel_movement.svg')
 
 
+def build_movement_onset_df():
+    """Build per-trial movement-onset dataframe for Fig. S5C."""
+    records = []
+    missing = []
+    for aid in ONSET_ANIMALS:
+        proc_path = PROCESSED_WHEEL_DIR / f'{aid.lower()}_wheel_processed.npz'
+        sidecar_path = PROCESSED_WHEEL_DIR / f'{aid.lower()}_session_idx.npz'
+        if not proc_path.exists() or not sidecar_path.exists():
+            missing.extend([str(p) for p in (proc_path, sidecar_path)
+                            if not p.exists()])
+            continue
+
+        proc = np.load(proc_path, allow_pickle=True)
+        side = np.load(sidecar_path, allow_pickle=True)
+        hit_onsets = proc['hit_onsets']
+        hit_rt = proc['hit_rt']
+        hit_session_idx = side['hit_session_idx']
+        sessions = side['sessions']
+
+        if len(hit_onsets) != len(hit_session_idx):
+            raise ValueError(f'{aid}: onset/session_idx length mismatch')
+
+        for onset, rt, sidx in zip(hit_onsets, hit_rt, hit_session_idx):
+            records.append({
+                'animal_id': aid,
+                'session': str(sessions[sidx]),
+                'onset_ms': float(onset),
+                'rt_ms': float(rt),
+            })
+
+    if missing:
+        raise FileNotFoundError('Missing movement-onset source files:\n' +
+                                '\n'.join(missing))
+
+    df = pd.DataFrame(records)
+    for aid in df['animal_id'].unique():
+        mask = df['animal_id'] == aid
+        dates = df.loc[mask, 'session'].apply(
+            lambda s: datetime.strptime(s, '%d-%b-%Y'))
+        first = dates.min()
+        days = (dates - first).dt.days
+        df.loc[mask, 'rel_week'] = np.where(days == 0, 0,
+                                            np.ceil(days / 7).astype(int))
+
+    df['rel_week'] = df['rel_week'].astype(int)
+    return df
+
+
+def generate_onset_early_late_panel():
+    """Generate Fig. S5C: movement onset early vs late."""
+    df = build_movement_onset_df()
+    df = df.dropna(subset=['onset_ms'])
+    df = df[df['rel_week'] < ONSET_MAX_WEEK].copy()
+    df['phase'] = np.where(df['rel_week'] <= 1, 'early', 'late')
+
+    early = df.loc[df['phase'] == 'early', 'onset_ms'].to_numpy()
+    late = df.loc[df['phase'] == 'late', 'onset_ms'].to_numpy()
+    stat, p = mannwhitneyu(early, late, alternative='two-sided')
+    r = rank_biserial_r(stat, len(early), len(late))
+
+    print(f'  Early onset: n={len(early)}, median={np.median(early):.0f} ms')
+    print(f'  Late onset: n={len(late)}, median={np.median(late):.0f} ms')
+    print(f'  Early vs late: U={stat:.0f}, p={p:.2e}, r={r:.3f}')
+
+    fig, ax = plt.subplots(figsize=(2.5, 2.5))
+    q1s, q3s = [], []
+    for x, values in enumerate([early, late]):
+        med = float(np.median(values))
+        q1 = float(np.percentile(values, 25))
+        q3 = float(np.percentile(values, 75))
+        ax.errorbar(x, med, yerr=[[med - q1], [q3 - med]],
+                    fmt='o', color='k', markersize=4, capsize=5,
+                    elinewidth=0.9, capthick=1.0, zorder=2)
+        q1s.append(q1)
+        q3s.append(q3)
+
+    y_top = max(q3s)
+    y_range = max(max(q3s) - min(q1s), 1e-6)
+    tick = 0.04 * y_range
+    yb = y_top + 0.10 * y_range
+    ax.plot([0, 0, 1, 1], [yb - tick, yb, yb, yb - tick],
+            color='k', lw=0.75)
+    stars = sig_text(p)
+    ax.text(0.5, yb + tick * 1.1, stars,
+            ha='center', va='bottom', fontsize=10 if stars != 'NS' else 7)
+
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(['Early', 'Late'])
+    ax.set_xlim(-0.5, 1.5)
+    ax.set_ylim(min(q1s) - 0.10 * y_range, yb + 0.20 * y_range)
+    ax.set_ylabel('Movement onset (ms)')
+    plt.tight_layout()
+
+    fig.savefig(FIG_DIR / 'onset_early_vs_late.svg',
+                format='svg', bbox_inches='tight')
+    fig.savefig(FIG_DIR / 'onset_early_vs_late.png',
+                dpi=300, bbox_inches='tight')
+    plt.close()
+    print('  Saved onset_early_vs_late.svg')
+
+    stats_path = FIG_DIR / 'onset_early_vs_late_stats.csv'
+    pd.DataFrame([{
+        'panel': 'Movement onset early vs late',
+        'comparison': 'early vs late',
+        'n1': len(early),
+        'n2': len(late),
+        'median1': f'{np.median(early):.4f}',
+        'median2': f'{np.median(late):.4f}',
+        'test': 'Mann-Whitney U (two-sided)',
+        'U': f'{stat:.0f}',
+        'p': f'{p:.2e}',
+        'r': f'{r:.3f}',
+    }]).to_csv(stats_path, index=False)
+    print(f'  Saved {stats_path}')
+
+
 def main():
     raw_df = pd.read_pickle(RAW_DF_120MS_PATH)
     df_pl = filter_pl(raw_df, max_z_score=100)
@@ -574,6 +696,9 @@ def main():
     # --- Wheel movement 1x3 ---
     print('\nWheel movement panels:')
     generate_wheel_panels()
+
+    print('\nMovement onset early vs late panel:')
+    generate_onset_early_late_panel()
 
 
 if __name__ == '__main__':
