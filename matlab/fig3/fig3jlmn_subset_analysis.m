@@ -243,9 +243,13 @@ fprintf('\n========================================\n');
 fprintf('FULL SUMMARY OF COUNTS\n');
 fprintf('========================================\n');
 fprintf('Panel I:\n');
-fprintf('  First valid dF/F histogram: %d data points\n', sum(valid_bMax));
-fprintf('  Last valid dF/F histogram: %d data points (%d subset, %d remaining)\n', ...
-    sum(valid_fMax), sum(valid_fMax & subset_idx), sum(valid_fMax & remaining_idx));
+if exist('valid_bMax', 'var') && exist('valid_fMax', 'var')
+    fprintf('  First valid dF/F histogram: %d data points\n', sum(valid_bMax));
+    fprintf('  Last valid dF/F histogram: %d data points (%d subset, %d remaining)\n', ...
+        sum(valid_fMax), sum(valid_fMax & subset_idx), sum(valid_fMax & remaining_idx));
+else
+    fprintf('  Histogram counts are reported by fig3i_histogram.m\n');
+end
 
 fprintf('Panel J:\n');
 fprintf('  Subset: %d total (%d early, %d late)\n', sum(subset_idx), numel(earSub), numel(latSub));

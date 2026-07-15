@@ -1,6 +1,7 @@
 function fig2svg(name, w, h, folder)
     if nargin < 4
         % Determine figure folder from name (e.g., "Fig2C" -> output/fig2/)
+        repoRoot = fileparts(fileparts(mfilename('fullpath')));
         tokens = regexp(name, '(?i)(S?Fig)[_]?(\d+)', 'tokens', 'once');
         if ~isempty(tokens)
             prefix = lower(tokens{1});
@@ -10,9 +11,9 @@ function fig2svg(name, w, h, folder)
             else
                 subfolder = sprintf('fig%s', num);
             end
-            folder = fullfile(pwd, 'output', subfolder);
+            folder = fullfile(repoRoot, 'output', subfolder);
         else
-            folder = fullfile(pwd, 'output');
+            folder = fullfile(repoRoot, 'output');
         end
     end
     if ~exist(folder,'dir'), mkdir(folder); end

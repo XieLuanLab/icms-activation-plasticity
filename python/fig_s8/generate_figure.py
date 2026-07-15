@@ -571,8 +571,8 @@ def main():
                  fontweight='bold', va='bottom')
 
     # Save
-    out_svg = FIG_DIR / 'figure_s7.svg'
-    out_png = FIG_DIR / 'figure_s7.png'
+    out_svg = FIG_DIR / 'figure_s8.svg'
+    out_png = FIG_DIR / 'figure_s8.png'
     fig.savefig(out_svg, format='svg', bbox_inches='tight')
     fig.savefig(out_png, dpi=200, bbox_inches='tight')
     plt.close()

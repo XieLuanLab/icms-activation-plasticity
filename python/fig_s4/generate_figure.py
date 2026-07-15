@@ -139,7 +139,8 @@ def plot_latency_jitter(raw_df):
                 slope = model.params[1]
                 p_val = model.pvalues[1]
                 r2 = model.rsquared
-                speed = 1.0 / slope if slope > 0 else float('inf')
+                # slope is ms/um, so its reciprocal is um/ms; 1 um/ms = 1e-3 m/s.
+                speed = 1e-3 / slope if slope > 0 else float('inf')
                 print(f'    {cur} uA: slope = {slope:.3f} ms/um (speed ~ {speed:.2f} m/s), '
                       f'p = {p_val:.3f}, r2 = {r2:.2f}')
                 stats_rows.append({
